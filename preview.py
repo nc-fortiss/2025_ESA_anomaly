@@ -12,7 +12,6 @@ def load_df_from_channel_zip(zip_path: Path) -> pd.DataFrame:
         inner = names[0]
         with zf.open(inner) as f:
             df = pd.read_pickle(io.BytesIO(f.read()))
-    # normalize a time column/index
     if isinstance(df.index, pd.DatetimeIndex):
         df = df.reset_index().rename(columns={df.index.name or "index": "time"})
     for cand in ["time","timestamp","date","datetime"]:
@@ -100,3 +99,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

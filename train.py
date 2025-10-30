@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Training a simple ConvNet for ESA anomalies, Akida 1.0–friendly
-# Requires: TensorFlow 2.15, your dataloader_tf.py from earlier
+# Training a simple ConvNet for ESA anomalies, Akida 1.0
+# Requires: TensorFlow 2.15
 
 import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -10,8 +10,21 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 from collections import Counter
+import os
+import sys
+from pathlib import Path
 
-from Dataloader import make_tf_datasets
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE)) 
+
+import dataloader_tf
+from dataloader_tf import make_tf_datasets
+print("[debug] using loader:", dataloader_tf.__file__)
+
+DATA_ROOT = (HERE / "ESA-Mission1").resolve()
+print("[debug] DATA_ROOT =", DATA_ROOT)
+assert (DATA_ROOT / "labels.csv").exists(), f"labels.csv not found at {DATA_ROOT}"
+assert (DATA_ROOT / "channels").exists(), f"channels/ not found at {DATA_ROOT}"
 
 # ---------------- GPU setup ----------------
 def setup_gpu():
@@ -93,8 +106,8 @@ def compute_class_weights(ds, max_batches=200):
     print(f"[class-weights] counts: 0={int(n0)} 1={int(n1)} → weights: 0={w0:.3f} 1={w1:.3f}")
     return {0: w0, 1: w1}
 
-# ---------------- Akida-friendly model ----------------
-def build_akida_friendly_model(window, n_channels):
+# ---------------- model ----------------
+def build_model(window, n_channels):
     """
     Build a small ConvNet using only Akida 1.0–compatible ops:
     Conv2D + ReLU + MaxPool2D + Flatten + Dense(+ReLU) + Dense(sigmoid).
@@ -123,27 +136,37 @@ def build_akida_friendly_model(window, n_channels):
 def main():
     setup_gpu()
 
-    DATA_ROOT = "/home/kannan/Kannan_Workspace/AI4FDIR/ESA-Mission1"
-
     # Build datasets (ALL channels), cache to disk to avoid re-loading 76 zips each run
     train_ds, val_ds, test_ds, meta = make_tf_datasets(
-        data_root=DATA_ROOT,
-        channel_ids=None,           # ALL channels
-        resample="1min",
-        start="2004-12-01T00:00:00Z",
-        end="2004-12-10T00:00:00Z",
+        data_root="/home/kannan/AI4FDIR/ESA-Mission1",
+        channel_ids=None,         # ALL channels
+        resample="1min",          
         window=60,
         stride=30,
         batch_size=128,
         label_mode="binary",
-        cache="/tmp/esa_cache",
+        cache="/tmp/esa_cache_all",   # disk cache (big)
         threaded=True,
         max_workers=8,
-        verbose=True
+        verbose=True,
+        use_full_timespan=True,      
     )
     window = meta["window"]
     n_channels = meta["n_channels"]
     print(f"[meta] window={window} n_channels={n_channels}")
+
+    def count_labels(ds, name):
+        import numpy as np
+        c0=c1=0
+        for _, y in ds:
+            y = y.numpy().reshape(-1)
+            c0 += np.sum(y==0)
+            c1 += np.sum(y==1)
+        print(f"[{name}] y==0: {c0}, y==1: {c1}")
+    count_labels(train_ds, "train")
+    count_labels(val_ds, "val")
+    count_labels(test_ds, "test")
+
 
     # Estimate normalization stats on the *already windowed* train dataset
     mean, std = estimate_norm_stats(train_ds, take_batches=80)
@@ -159,30 +182,57 @@ def main():
     xb, yb = next(iter(train_ds))
     print("[batch] X:", xb.shape, "y:", yb.shape)  # (batch, window, n_channels, 1)
 
-    # Build Akida-friendly model
-    model = build_akida_friendly_model(window=window, n_channels=n_channels)
+    # Build model
+    model = build_model(window=window, n_channels=n_channels)
     model.summary()
 
+    # model.compile(
+    #     optimizer=keras.optimizers.Adam(1e-3),
+    #     loss="binary_crossentropy",
+    #     metrics=[keras.metrics.AUC(name="auroc"), "accuracy"]
+    # )
+    def focal_loss(gamma=2., alpha=0.25):
+        import tensorflow as tf
+        def _focal_loss(y_true, y_pred):
+            y_true = tf.cast(y_true, tf.float32)
+            bce = tf.keras.backend.binary_crossentropy(y_true, y_pred)
+            p_t = y_true * y_pred + (1 - y_true) * (1 - y_pred)
+            return alpha * tf.pow(1 - p_t, gamma) * bce
+        return _focal_loss
+
     model.compile(
-        optimizer=keras.optimizers.Adam(1e-3),
-        loss="binary_crossentropy",
-        metrics=[keras.metrics.AUC(name="auroc"), "accuracy"]
+        optimizer=tf.keras.optimizers.Adam(1e-3),
+        loss=focal_loss(gamma=2, alpha=0.25),
+        metrics=[tf.keras.metrics.AUC(name="auroc"), "accuracy"]
     )
 
     # Handle imbalance
     class_weights = compute_class_weights(train_ds, max_batches=200)
 
     # Callbacks (checkpoint H5; early stop)
-    ckpt_path = "akida_friendly_cnn.h5"  # classic H5 for later Akida conversion
+    ckpt_path = "ESA_cnn.h5" 
+    import datetime
+
+    log_dir = f"logs/fit/{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    tensorboard_cb = keras.callbacks.TensorBoard(
+        log_dir=log_dir,
+        histogram_freq=1,
+        write_graph=True,
+        write_images=False,
+        update_freq="epoch"
+    )
+
     callbacks = [
+        tensorboard_cb,
         keras.callbacks.ModelCheckpoint(
             ckpt_path, monitor="val_auroc", mode="max",
             save_best_only=True, save_weights_only=False
         ),
         keras.callbacks.EarlyStopping(
             monitor="val_auroc", mode="max", patience=5, restore_best_weights=True
-        )
+        ),
     ]
+
 
     # Train
     history = model.fit(
@@ -199,7 +249,8 @@ def main():
 
     # Save normalization stats to reuse at inference/export
     np.savez("norm_stats.npz", mean=mean, std=std)
-    print("[save] Model →", ckpt_path, "| Norm stats → norm_stats.npz")
+    print("[save] Model", ckpt_path, "| Norm stats norm_stats.npz")
 
 if __name__ == "__main__":
     main()
+

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import io
 import zipfile
 from pathlib import Path
@@ -20,7 +21,6 @@ def _load_channel_zip(zip_path: Path) -> pd.DataFrame:
         df = df.reset_index().rename(columns={df.index.name or "index": "time"})
     df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
     df = df.dropna(subset=["time"]).sort_values("time").reset_index(drop=True)
-    # keep only first numeric column as value
     value_cols = [c for c in df.columns if c != "time"]
     if not value_cols:
         raise ValueError(f"No value column found in {zip_path}")
@@ -94,7 +94,6 @@ def _merge_channels(
         merged = merged.merge(f, on="time", how="outer")
 
     merged = merged.sort_values("time")
-    # Fill join gaps; forward/backward fill remaining edges
     merged = merged.interpolate(limit_direction="both").ffill().bfill()
     return merged
 
@@ -192,48 +191,41 @@ def _to_tf_dataset(Xw: np.ndarray, Y: np.ndarray, batch_size: int, shuffle: bool
 
 def make_tf_datasets(
     data_root: str,
-    channel_ids: Optional[List[int]] = None,   # None = use ALL channels
+    channel_ids: Optional[List[int]] = None,
     resample: str = "1min",
     start: Optional[str] = None,
     end:   Optional[str] = None,
     window: int = 60,
     stride: int = 30,
     batch_size: int = 64,
-    label_mode: str = "binary",               # 'binary' | 'class' | 'subclass'
-    splits: Tuple[float, float, float] = (0.7, 0.15, 0.15),
-    cache: Optional[str] = None,              # None | "memory" | "/path/to/cache_dir"
+    label_mode: str = "binary",
+    splits=(0.7, 0.15, 0.15),
+    cache: Optional[str] = None,
     threaded: bool = True,
     max_workers: int = 8,
-    verbose: bool = True
+    verbose: bool = True,
+    use_full_timespan: bool = False, 
 ):
-    """
-    Builds (train_ds, val_ds, test_ds, meta).
-
-    Each dataset yields:
-      X: float32 [batch, window, n_channels]
-      y: int32   [batch]
-
-    meta keys:
-      - feature_names
-      - class_to_idx (for class/subclass mode)
-      - n_channels, window, stride, resample
-      - shapes: dict(train=..., val=..., test=...)
-    """
     import time
     t0 = time.time()
     root = Path(data_root).expanduser().resolve()
 
-    # Choose time range 
-    labs = pd.read_csv(root / "labels.csv")
-    lab_min = pd.to_datetime(labs["StartTime"], utc=True).min()
-    lab_max = pd.to_datetime(labs["EndTime"],   utc=True).max()
-    t0_user = pd.to_datetime(start, utc=True) if start else lab_min
-    t1_user = pd.to_datetime(end,   utc=True) if end   else lab_max
+    # Choose time range
+    if start is None and end is None and use_full_timespan:
+        # Load ALL available data from channels (no time windowing)
+        t0_user = None
+        t1_user = None
+        if verbose:
+            print("[time] using FULL timespan from channels (no start/end limits)")
+    else:
+        labs = pd.read_csv(root / "labels.csv")
+        lab_min = pd.to_datetime(labs["StartTime"], utc=True).min()
+        lab_max = pd.to_datetime(labs["EndTime"],   utc=True).max()
+        t0_user = pd.to_datetime(start, utc=True) if start else lab_min
+        t1_user = pd.to_datetime(end,   utc=True) if end   else lab_max
+        if verbose:
+            print(f"[time] {t0_user} → {t1_user}")
 
-    if verbose:
-        print(f"[cfg] channels={channel_ids or 'ALL'} resample={resample} "
-              f"window={window} stride={stride} mode={label_mode}")
-        print(f"[time] {t0_user} → {t1_user}")
 
     # Merge all channels
     df = _merge_channels(
@@ -272,7 +264,7 @@ def make_tf_datasets(
     if verbose:
         print(f"[windows] train={X_tr.shape} val={X_va.shape} test={X_te.shape}")
 
-
+    # tf.data datasets
     train_ds = _to_tf_dataset(X_tr, y_tr, batch_size, shuffle=True)
     val_ds   = _to_tf_dataset(X_va, y_va, batch_size, shuffle=False)
     test_ds  = _to_tf_dataset(X_te, y_te, batch_size, shuffle=False)
@@ -292,7 +284,6 @@ def make_tf_datasets(
             val_ds   = val_ds.cache(str(cache_dir / "val.cache"))
             test_ds  = test_ds.cache(str(cache_dir / "test.cache"))
 
-    # Always prefetch
     train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
     val_ds   = val_ds.prefetch(tf.data.AUTOTUNE)
     test_ds  = test_ds.prefetch(tf.data.AUTOTUNE)
@@ -312,8 +303,7 @@ def make_tf_datasets(
 
     return train_ds, val_ds, test_ds, meta
 
-# -------------- Convenience: transpose for (batch, channels, window) --------------
-
+#transpose for (batch, channels, window) 
 def map_time_last_to_channel_first(ds: tf.data.Dataset) -> tf.data.Dataset:
     """For models that expect (batch, channels, window) instead of (batch, window, channels)."""
     def _swap(x, y):
@@ -321,32 +311,5 @@ def map_time_last_to_channel_first(ds: tf.data.Dataset) -> tf.data.Dataset:
         return x, y
     return ds.map(_swap, num_parallel_calls=tf.data.AUTOTUNE)
 
-# # -------------- Smoke test --------------
 
-# if __name__ == "__main__":
-#     import os
-#     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-#     # os.environ["CUDA_VISIBLE_DEVICES"] = ""  # uncomment to force CPU
 
-#     DR = "/home/kannan/Kannan_Workspace/AI4FDIR/ESA-Mission1"
-
-#     # Small fast sanity check (subset of channels, short window)
-#     print("\n[smoke] subset=12,13,14 for 1 day, 1min resample")
-#     tr, va, te, meta = make_tf_datasets(
-#         data_root=DR,
-#         channel_ids=[12, 13, 14],
-#         resample="1min",
-#         start="2004-12-01T00:00:00Z",
-#         end="2004-12-02T00:00:00Z",
-#         window=30,
-#         stride=15,
-#         batch_size=64,
-#         label_mode="binary",
-#         cache="memory",
-#         threaded=True,
-#         max_workers=8,
-#         verbose=True
-#     )
-#     print("[meta]", meta)
-#     xb, yb = next(iter(tr))
-#     print("[smoke] train batch:", xb.shape, yb.shape)

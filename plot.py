@@ -58,6 +58,7 @@ def main():
         # keep only the column that matches this channel
         value_col = f"channel_{cid}"
         if value_col not in df.columns:
+            # if inner column is unnamed, assume last numeric col
             value_candidates = [c for c in df.columns if c != "time"]
             value_col = value_candidates[0]
             df = df.rename(columns={value_col: f"channel_{cid}"})
@@ -68,14 +69,14 @@ def main():
             df = df.set_index("time").resample(args.resample).mean(numeric_only=True).dropna().reset_index()
         if args.every > 1:
             df = df.iloc[::args.every, :]
-        print(f"    • channel_{cid}: {df.shape[0]} samples in window")
+        print(f"channel_{cid}: {df.shape[0]} samples in window")
         frames.append(df[["time", value_col]])
 
     if not frames:
-        print("[!] No data to plot in the requested window.")
+        print("No data to plot in the requested window.")
         return
 
-    # merge on time
+    # merge on time 
     out = frames[0]
     for f in frames[1:]:
         out = out.merge(f, on="time", how="outer")
@@ -112,7 +113,7 @@ def main():
                 s, e = row["StartTime"], row["EndTime"]
                 ax.axvspan(s, e, alpha=0.15)
     axes[-1].set_xlabel("time")
-    fig.suptitle(f"ESA raw channels {sel}")
+    fig.suptitle(f"ESA raw channels")
     fig.tight_layout(rect=[0, 0, 1, 0.97])
 
     if args.save:
@@ -124,3 +125,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
