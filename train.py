@@ -108,29 +108,32 @@ def compute_class_weights(ds, max_batches=200):
 
 # ---------------- model ----------------
 def build_model(window, n_channels):
-    """
-    Build a small ConvNet using only Akida 1.0–compatible ops:
-    Conv2D + ReLU + MaxPool2D + Flatten + Dense(+ReLU) + Dense(sigmoid).
-    Input format: [B, H=window, W=n_channels, C=1]
-    """
+
     inputs = keras.Input(shape=(window, n_channels, 1), dtype="float32", name="input")
 
-    # Conv stack (keep it simple for Akida conversion)
-    x = layers.Conv2D(16, (5, 5), padding="same", activation="relu")(inputs)
-    x = layers.MaxPooling2D((2, 2))(x)
+    # Block 1
+    x = layers.Conv2D(16, (5, 5), padding="same", activation="linear", name="conv1")(inputs)
+    x = layers.Activation("relu", name="conv1_relu")(x)
+    x = layers.MaxPooling2D((2, 2), padding="same", name="pool1")(x)
 
-    x = layers.Conv2D(32, (3, 3), padding="same", activation="relu")(x)
-    x = layers.MaxPooling2D((2, 2))(x)
+    # Block 2
+    x = layers.Conv2D(32, (3, 3), padding="same", activation="linear", name="conv2")(x)
+    x = layers.Activation("relu", name="conv2_relu")(x)
+    x = layers.MaxPooling2D((2, 2), padding="same", name="pool2")(x)
 
-    x = layers.Conv2D(64, (3, 3), padding="same", activation="relu")(x)
-    x = layers.MaxPooling2D((2, 2))(x)
+    # Block 3
+    x = layers.Conv2D(64, (3, 3), padding="same", activation="linear", name="conv3")(x)
+    x = layers.Activation("relu", name="conv3_relu")(x)
+    x = layers.MaxPooling2D((2, 2), padding="same", name="pool3")(x)
 
-    x = layers.Flatten()(x)
-    x = layers.Dense(64, activation="relu")(x)
-    outputs = layers.Dense(1, activation="sigmoid", name="output")(x)
+    x = layers.Flatten(name="flatten")(x)
+    x = layers.Dense(64, activation="linear", name="fc1")(x)
+    x = layers.Activation("relu", name="fc1_relu")(x)
+    x = layers.Dense(1, activation="linear", name="logit")(x)
+    outputs = layers.Activation("sigmoid", name="output")(x)
 
-    model = keras.Model(inputs, outputs, name="akida_friendly_cnn")
-    return model
+    return keras.Model(inputs, outputs, name="akida_friendly_cnn_v2")
+
 
 # ---------------- main ----------------
 def main():
